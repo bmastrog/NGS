@@ -1,0 +1,282 @@
+---
+title: "RNAseq Arabidopsis"
+output: html_document
+---
+
+#Load Data
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+
+load("~/Documents/Applied Genomics/Homework3/RNAseq_arabidopsis_genelevel_counts_length.RData")
+
+tpm <- function(read_count, gene_length){ 
+  RPK <- read_count / gene_length
+  Per_mil_scal <- colSums(RPK)/1000000
+  TPM <- RPK/Per_mil_scal
+  return(TPM)
+}
+
+```
+
+# Normalization
+The "real estate effect" refers to the bias that results when a small number of genes are very highly expressed. 
+As there are a fixed number of reads per lane, the other genes will necessarily be biased downwards.  This skews analysis towards one experimental condition, and can potentially result in a higher false positive rate and lower power to detect true differences (Robinson et al).
+
+In the below data, we have a condition (column 1), with one gene (row 1) that is very highly expressed, and the other genes (the rest of the rows in column 1) with a much lower expression value.  Column 2 does not have one largely expressed gene, but genes of equal expression.  These values are larger than the values in column 1.  The raw difference is not extremely large, but significant differences cannot be readily determined from the raw values.
+
+
+```{r}
+load("~/Documents/Applied Genomics/Homework3/smallRNA_simulated.RData")
+library(edgeR)
+
+norm_facs <- calcNormFactors(A, method = "TMM")
+
+normalized_counts <- matrix(,nrow=length(A),ncol=2)
+for(i in 1:2){
+  normalized_counts[,i] <- A[,i]/norm_facs[i]
+}
+
+head(normalized_counts)
+
+```
+
+This normalization technique returned values that were all identical, except for condition one which had a much larger difference prior to normalization.  However, this normalization technique shows that the gene expressed in the first row is significiantly differntially expressed between the two conditions.  This result is in accordance with the assumption that most microRNAs had similar expression between conditions.
+
+# Major Issues to Account For
+(1) Poisson count noise
+
+Matching a read to a random transcript in the transcriptome is essentially a Poisson process that is complicated by differing abundances of transcripts.  In a Poisson process, the number observed occurrences has differing values about its mean with a standard deviation.  Since the poisson distribution is a one parameter distribution, the mean of the distribution is always equal to the variance.  So, a poisson distribution can only describe the counting noise and cannot account for other areas of variation.  This is an inappropriate model to use for RNA seq because it does not account for biological and technical variance.  The negative binomial distribution accounts for additional variance (called overdispersion) beyond the variance expected from randomly sampling from a pool of molecules of different abundances (Conesa et al).  In other words, the negative binomial distribution reflects many poisson distributions at different means, which is a more appropriate model for RNA transcripts of varying abundances.  An alternative approch involves calculating weights to account for noise and use them for a weighted linear model.
+
+
+(2) Moderated t-test
+
+The t statistic can emphasize the difference in two group means of raw data, but if we take logs it tends to emphasize the ratio of the means. This is important for RNA seq because we want to compare changes of means and determine which changes are significant or not.  However, RNA seq data often is heteroscedastic, meaning that subpopulations of the data have different variances.  Limma uses a moderated t-test to account for the differing variances by calculating a pooled estimate of variance across all genes. This provides a global estimate of variance, which can improve statistical power even when there are few replicates (Ritchie et al).
+
+(3) Normalisation
+
+Normalization methods need to account for the real estate effect, or when highly variable and/or highly expressed features drive down expression levels of lower expressed genes.  This is caused by the fixed number of reads per lane.  Trimmed means method (TMM) is robust agains these outliers and can be used to normalize samples (Conesa et al).  If possible, spike-ins of known RNA concentrations should be used to normalize samples.
+
+
+(4) Multiple testing correction
+
+In high throughput sequencing (HTS) there is massive potential multiple testing issue, since thousands of features are measured simultaneously.  If multiple simultaneous hypotheses tests are performed, we can have a large overall false positive rate, even though each feature can have a small false positive rate.  This problem often occurs measuring multiple features in an experiment, so the thousands of features in RNA seq data are very susceptible.  To prevent this issue from occurring, we need to control Family-wise error rate control (FWER) and False discovery rate (FDR).  To account for this Filtering out genes that are expressed at low levels prior to differential expression analysis reduces the severity of the correction and may improve the power of detection (Conesa et al).  Bonferroni/Holm correction can be used to control FWER.  Benjamini-Hockberg (BH)method and Storey method can be used to adjust p-values for FDR.
+
+
+## Install needed packages the first time only
+```{r}
+#source("http://bioconductor.org/biocLite.R")
+#biocLite("limma")
+#biocLite("edgeR")
+#install.packages("dplyr")
+#install.packages("WriteXLS")
+# (Note: under Windows will also need to install Perl)
+```
+
+## Load libraries
+```{r}
+library("dplyr")  # for arrange() function
+library(limma)    # main limma package
+library(edgeR)    # we need the TMM function from edgeR
+library(WriteXLS) # for convenience, we will save the final results as an Excel file
+```
+
+## Load raw data
+This is the RNA-seq counts per gene. This was calculated using featureCounts. Also load sample information (stored in data.frame "ss")
+
+```{r}
+load(file=paste("RNAseq_arabidopsis_genelevel_counts.RData",sep=""))
+ss <- read.delim("experiment_info.tsv")
+```
+
+Look at the raw count data saved from featureCounts
+```{r}
+colnames(counts)
+dim(counts)
+ss   # labels of samples (this needs to have the predictors corresponding to each bam filename)
+
+genelevel_counts <- counts
+```
+
+Convert counts from standard R list to Bioconductor DGEList data structure
+```{r}
+dge <- DGEList(counts=genelevel_counts)
+```
+
+## Non-specific filter to remove low count features
+This step removes genes that are so lowly expressed that they cannot possibly show significant differential expression.  This removes noise there are better calculations for FDR and  weights later in the pipeline.  This helps mollify the statistical issue of noise (Issue 1 and 4).
+```{r}
+# (requires > 1 CPM over at least 3 samples)
+#isexpr <- rowSums(cpm(dge) > 1) >=3  # require a minimum counts per million
+isexpr <- rowSums(dge$counts > 50) >=3  # or we can specify a minimum count
+
+# Check what fraction of genes remain
+sum(isexpr)/nrow(dge)
+
+# Remove low expressed genes.
+dge <- dge[isexpr,,keep.lib.sizes=FALSE] # keep.lib.sizes=FALSE to force recalculating library sizes from sums of column counts (note: we can also pass in library sizes explicitly)
+
+dim(dge)
+```
+
+## TMM normalization
+This step accounts for bias of highly expressed genes or the real estate effect.  This normalization method is robust to outliers. (Issue 3- Normalization)
+```{r}
+dge <- calcNormFactors(dge)
+```
+
+## Calculate design matrix 
+(this also works with base R) 
+(using default treatment contrasts for this example)
+
+Note: no need to specify the response variable here, so we leave it out.
+
+Note: I use the column "genotype" to indicate MT knockout vs WT, and "stressor" to indicate oxidative stress or no stress.
+
+```{r}
+design <- model.matrix(~stressor*genotype, data=ss)
+```
+
+Note: this design matrix uses the default R "treatment contrasts" so the columns 1 to 4 represent:
+1. "(Intercept)" is mean WT unstressed
+2. "stressorstress_Root" is WT stressed - WT unstressed
+3. "genotypemt" is MT knockout unstressed - WT unstressed
+4. "stressorstress_Root:genotypemt" is interaction term
+
+Note that the contrast "stressed versus unstressed MT knockout" is *not* available
+
+## Calculate weights to correct for Poisson count noise due to discrete nature of RNA-seq. 
+This is done by empirically fitting a curve to (and also log converts).
+
+This allows us to use a weighted linear model rather than requiring a more complex generalized linear model of a negative binomial distribution (Issue1).
+
+This model is very fexible and can be used for both microarray and HTS.  Calculated weights can be used for other processing, like clustering.
+
+```{r}
+v <- voom(dge,design,plot=TRUE) # Note: optionally, we can pass library sizes explicity here
+```
+
+## Fit linear models across all genes using lmFit 
+(like lm() in base R)
+This addresses issue 1, since it is generating a weighted linear model.
+```{r}
+fit <- lmFit(v,design)
+```
+
+## eBayes computes F (overall "omnibus" p-values) and (moderated) t-statistics for all genes
+(like anova() in base R)
+This step accounts for issue 2 which allows for "shrinking" of variance towards limma's pooled global variance.  
+```{r}
+fit2  <- eBayes(fit)
+colnames(fit2)
+```
+## Do FDR multiple testing correction and extract list of most significant genes (using Benjamini-Hockberg by default)
+This step addresses issue 4.  FDR is less conservative than FWER correction, so it is more appropriate for the exploratory nature of this analysis.  Here measure the differential fold changes at all genes simultaneously using RNA-seq and calculate a p-value for significance of the fold change for each gene using e.g. t-test.  
+```{r}
+R_interaction = topTable(fit2, coef="stressorstress_Root:genotypeWT", number=nrow(dge$counts)) 
+R_stress_vs_ctrl_in_WT = topTable(fit2, coef="stressorstress_Root", number=nrow(dge$counts))
+R_mt_vs_WT_in_ctrl = topTable(fit2, coef="genotypeWT", number=nrow(dge$counts))
+```
+## How many significant genes showing interaction are there at FDR of 5% ?
+```{r}
+dim(R_interaction[R_interaction$adj.P.Val <= 0.05,])
+head(R_interaction)
+```
+
+## Set a contrast matrix that specifies directly the contrasts we are interested in.
+The above analysis used the default "treatment contrasts" of R as specied by the design matrix. However, that does not give us the oxidative stress vs unstressed in MT knockout contrast which we may be interested in, but we can get that using custom contrasts (see Crawley- The R Book 1 ed p371 for a full example in base R)
+
+```{r}
+cont.matrix <- cbind(stress_vs_ctrl_in_WT=c(0,1,0,0),stress_vs_ctrl_in_mt=c(0,1,0,1),interaction=c(0,0,0,1))
+
+fit3 <- contrasts.fit(fit, cont.matrix)	# like contrasts() in base R
+
+colnames(fit3)
+```
+
+## Compute F and (moderated) t-statistics for all genes
+This is the implementation of Issue 2.  
+```{r}
+fit3  <- eBayes(fit3)
+```
+
+## Get top ranked genes
+```{r}
+R_interaction2 = topTable(fit3, coef="interaction", number=nrow(dge$counts),adjust.method="BH")
+R_stress_ctrl_WT = topTable(fit3, coef="stress_vs_ctrl_in_WT", number=nrow(dge$counts),adjust.method="BH")
+R_stress_ctrl_mt = topTable(fit3, coef="stress_vs_ctrl_in_mt", number=nrow(dge$counts),adjust.method="BH")
+```
+
+## Optionally, save results in Excel format.
+```{r}
+# make list of data.frames to write to xls file
+sigGenes = list()
+sigGenes[["R_interaction2"]] = R_interaction2
+sigGenes[["R_stress_ctrl_WT"]] =R_mt_vs_WT_in_ctrl
+sigGenes[["R_stress_ctrl_mt"]] =R_stress_ctrl_mt
+
+sigGenes_fdr05 = lapply(sigGenes, function(x) x[x[,"adj.P.Val"]<=0.05,])  # limit to FDR of 0.05
+
+# print number of significant genes
+lapply( sigGenes_fdr05, nrow)
+
+# write out results in Excel format
+WriteXLS("sigGenes_fdr05",ExcelFileName=paste("expression_genelevel_limma_example.xls",  sep=""),row.names=T, FreezeRow=1,FreezeCol=1,AdjWidth=F)	
+```
+
+## Generate coomon plots for exploratory data analysis
+```{r}
+volcanoplot(fit3, coef="stress_vs_ctrl_in_WT")
+plotMD(fit3, main="plotMD(fit3)", cex=0.5, coef="stress_vs_ctrl_in_WT")  # MA plot 
+plotMDS(v, main="plotMDS(v)",cex=0.5,col=c(rep("red",3),rep("green",3),rep("blue",3),rep("black",3)))
+plotDensities(v, main="plotDensities(v)",cex=0.5,legend=F)
+```
+
+## Do gene set enrichment analysis (GSEA)  
+
+Load arabidopsis geneset info
+(plant geneset from http://structuralbiology.cau.edu.cn/PlantGSEA/download.php)
+```{r}
+load(file="Ara_genesets2.RData")
+```
+
+Loads arasets, which defines the genesets.
+Also loads dset_desc (used later), which describes the genesets.
+
+## We need to convert from gene symbols to the index of the gene in the data to call romer() (see documentation)
+```{r}
+C2t <- ids2indices(arasets, rownames(v))
+```
+
+## Do romer GSEA on each contrast of interest
+```{r}
+rr_resUP = list()
+rr_resDN = list()
+rr_resMIXED = list()
+
+for (jj in colnames(cont.matrix)) {
+  cat(jj, "\n")
+  # call romer for GSEA. v stores our count data (with weights); C2t stores the gene set information; design stores the experimental design; contrast stores our particular contrasts of interest
+  rr <- romer(v,C2t,design=design,contrast=cont.matrix[,jj],nrot=1000)      # ideally, should do >= 1000 rotations
+  romerUP_rr=topRomer(rr,n=20,alt="up")
+  romerDN_rr=topRomer(rr,alt="down")
+  romerMIXED_rr=topRomer(rr,alt="mixed")
+  
+  # This R code simply includes the geneset descriptions in the output (note: arrange() orders by the column "Up")
+  romerUP_rr  = arrange(merge(data.frame(romerUP_rr), dset_desc, by.x="row.names", by.y="V1",all.x=T), Up)
+  romerDN_rr  = arrange(merge(data.frame(romerDN_rr), dset_desc, by.x="row.names", by.y="V1",all.x=T), Down)
+  romerMIXED_rr  = arrange(merge(data.frame(romerMIXED_rr), dset_desc, by.x="row.names", by.y="V1",all.x=T), Mixed)
+  
+  rr_resUP[[jj]] = romerUP_rr
+  rr_resDN[[jj]] = romerDN_rr
+  rr_resMIXED[[jj]] = romerMIXED_rr
+}
+res_dir = "./" 
+RData_dir = "./"
+WriteXLS("rr_resMIXED",Encoding="latin1",ExcelFileName=paste(res_dir,"romer_rrMIXED_res.xls",sep=""),row.names=F, FreezeRow=1,FreezeCol=1,AdjWidth=F)	
+WriteXLS("rr_resUP",Encoding="latin1",ExcelFileName=paste(res_dir,"romer_rrUP_res.xls",  sep=""),row.names=F, FreezeRow=1,FreezeCol=1,AdjWidth=F)	
+WriteXLS("rr_resDN",Encoding="latin1", ExcelFileName=paste(res_dir,"romer_rrDN_res.xls",  sep=""),row.names=F, FreezeRow=1,FreezeCol=1,AdjWidth=F)	
+
+save(rr_resMIXED,rr_resUP,rr_resDN, file= paste(RData_dir,"romer_rr_res.RData",  sep=""))
+```
+
+
