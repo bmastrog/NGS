@@ -1,0 +1,284 @@
+---
+title: "RNASeq Mouse Brain Alternative Splicing Analysis"
+author: "Brooke Mastrogiacomo"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+#load libaries
+library(dplyr) # for arrange function
+library(limma)    # main limma package
+library(edgeR)    # we need the TMM function from edgeR
+library(WriteXLS) # for convenience, we will save the final results as an Excel file
+
+```
+
+#Differential Expression Analysis
+
+```{r Create DGElist}
+#load gene level counts
+load(file = "HW2_mouse_brain_RNAseq_genelevel_counts.RData")
+
+#average technical replicates
+gene_counts1 <- counts[, 1:8]
+gene_counts2 <- counts[,9:16]
+gene_counts <- (gene_counts1+gene_counts2)/2
+
+
+#load sample information and abridge to account for averaging of technical replicates
+expt.des <- read.delim("hw2_exp_design.tsv")
+expt.des <- expt.des[1:8,]
+
+#Convert counts from standard R list to Bioconductor DGEList data structure
+DGE <- DGEList(counts=gene_counts)
+
+```
+
+Non-specific filter to remove low count features
+```{r}
+
+# Specify a minimum count
+isexpr <- rowSums(DGE$counts > 100) >=3  
+
+# Check what fraction of genes remain
+sum(isexpr)/nrow(DGE)
+
+# Remove low expressed genes
+# keep.lib.sizes=FALSE to force recalculating library sizes from sums of column counts
+DGE <- DGE[isexpr,,keep.lib.sizes=FALSE]  
+
+```
+
+TMM normalization
+```{r TMM}
+DGE <- calcNormFactors(DGE)
+```
+
+Calculate design matrix 
+```{r design matrix}
+#indicates condition for each lane
+#Makes NS 1 and KS 0
+
+design <- model.matrix(~stressor, data = expt.des ) 
+
+```
+
+Calculate weights to correct for Poisson count noise due to discrete nature of RNA-seq.
+```{r}
+v <- voom(DGE,design,plot=TRUE)
+```
+
+Fit linear models across all genes using lmFit 
+```{r}
+fit <- lmFit(v,design)
+```
+
+eBayes computes F (overall "omnibus" p-values) and (moderated) t-statistics for all genes
+
+```{r}
+fit2  <- eBayes(fit)
+colnames(fit2)
+```
+
+Do FDR multiple testing correction and extract list of most significant genes (using Benjamini-Hockberg by default)
+```{r}
+
+R_interaction = topTable(fit2,, number=nrow(DGE$counts), adjust.method="BH") 
+
+#look at number of DEGs with FDR <= 10%
+dim(R_interaction[R_interaction$adj.P.Val <= 0.10,])
+
+#look at top of list of DEGs with FDR <= 10%
+head(R_interaction[R_interaction$adj.P.Val <= 0.10,])
+
+```
+
+#How many significant genes showing interaction are there at FDR of 10% ?
+```{r}
+#isolate the genes with FDR less than 10%
+sigGenes_fdr10 = R_interaction[R_interaction$adj.P.Val <= 0.10,]  # limit to FDR of 0.10
+
+# write out results in Excel format
+WriteXLS("sigGenes_fdr10",ExcelFileName=paste("diff_gene_bhm263.xls",  sep=""),row.names=T, FreezeRow=1,FreezeCol=1,AdjWidth=F)	
+```
+
+#Exploratory plots
+```{r plots}
+# Plots- exploratory data analysis
+# How many cell types and in what order are they stored?
+levels(expt.des$stressor)
+## Let's choose purple for basal and orange for luminal
+col.cell <- c("purple","orange")[expt.des$stressor]
+data.frame(expt.des$stressor,col.cell)
+
+volcanoplot(fit2, coef = "stressorNS")
+plotMD(fit2, main="plotMD(fit2)", coef = "stressorNS")  # MA plot 
+plotMDS(v, main="plotMDS(v)", col= col.cell)
+plotDensities(v, main="plotDensities(v)",legend=F)
+```
+
+#GSEA
+
+Set up contrast matrix 
+```{r}
+
+cont.matrix <- makeContrasts( "stressorNS", levels= design )
+#ensure rownames match up
+rownames(cont.matrix) = c("(Intercept)", "stressorNS")
+
+fit3 <- contrasts.fit(fit, cont.matrix)	# like contrasts() in base R
+
+```
+
+We need to convert from gene symbols to the index of the gene in the data to call romer() 
+```{r}
+load("~/Documents/AppliedGenomics/HW_upload_04042018/Mm.H.symbol.Rdata")
+
+#isolate names of gene sets
+dset_desc = matrix(nrow=length(Mm.H.symbol), ncol=1)
+for(i in 1: length(Mm.H.symbol)){
+  dset_desc[i,1] <- names(Mm.H.symbol)[i]
+}
+dset_desc<- as.data.frame(dset_desc)
+
+mapped <- ids2indices(Mm.H.symbol, rownames(v))
+```
+
+Do romer GSEA on each contrast of interest
+```{r}
+rr_resUP = list()
+rr_resDN = list()
+rr_resMIXED = list()
+
+for (jj in colnames(cont.matrix)) {
+  cat(jj, "\n")
+  # call romer for GSEA. v stores our count data (with weights) 
+  #mapped stores the gene set information; design stores the experimental design; 
+  #contrast stores our particular contrasts of interest
+  rr <- romer(v,mapped,design=design,contrast=cont.matrix[,jj],nrot=1000)      
+  # ideally, should do >= 1000 rotations
+  romerUP_rr=topRomer(rr,n=20,alt="up")
+  romerDN_rr=topRomer(rr,alt="down")
+  romerMIXED_rr=topRomer(rr,alt="mixed")
+  
+  # This R code simply includes the geneset descriptions in the output (note: arrange() orders by the column "Up")
+  romerUP_rr  = arrange(merge(data.frame(romerUP_rr), dset_desc, by.x="row.names", by.y="V1",all.x=T), Up)
+  romerDN_rr  = arrange(merge(data.frame(romerDN_rr), dset_desc, by.x="row.names", by.y="V1",all.x=T), Down)
+  romerMIXED_rr  = arrange(merge(data.frame(romerMIXED_rr), dset_desc, by.x="row.names", by.y="V1",all.x=T), Mixed)
+  
+  rr_resUP[[jj]] = romerUP_rr
+  rr_resDN[[jj]] = romerDN_rr
+  rr_resMIXED[[jj]] = romerMIXED_rr
+}
+
+rr_resUP
+rr_resDN
+rr_resMIXED
+```
+
+
+#Top 20 gene sets
+ Comment on your findings (you can refer to the original paper).
+```{r}
+
+res_dir = "./" 
+RData_dir = "./"
+WriteXLS("rr_resUP",Encoding="latin1",ExcelFileName=paste(res_dir,"GSEA_up_bhm263.xls",  sep=""),row.names=F, FreezeRow=1,FreezeCol=1,AdjWidth=F)
+```
+
+The two conditions NS(norepinephrine) and KS (potassium choloride) have very different physiological events.  Norepinephrine is a neurotransmitter that leads to increased metabolic rate, immune response, increased fat breakdown, and many other complex responses.  Potassium chloride can be given to treat low blood potassium.  Thus, differentially expressed genes/gene sets should be involved or related to the systems that norepinephrine affects.  Several of the enriched gene sets are involved with metabolism, especially fatty acid metabolism.  There are also gene sets that are involved in immune response.  Given the two conditions, the gene sets enriched correspond to the expected physiological response of norepinephrine release.
+
+#Exon level differential splicing 
+```{r}
+# load raw data- this is the RNA-seq counts per exon 
+# use same expt design variable as prior
+
+load(file=paste("HW2_mouse_brain_RNAseq_exonlevel_counts.RData",sep=""))
+
+# average the technical replicates 
+exon_counts1 <- counts[, 1:8]
+exon_counts2 <- counts[,9:16]
+exon_counts <- (exon_counts1+exon_counts2)/2
+
+# convert data.frame to Bioconductor DGEList data structure
+dge_ex <- DGEList(counts=exon_counts)
+dim(dge_ex)
+
+```
+
+
+```{r}
+# non-specific filter to remove low count features
+# (requires > 5 counts over at least 3 samples)
+isexpr_ex <- rowSums(dge_ex$counts > 5) >= 3
+
+# check what fraction of exons remain
+sum(isexpr_ex)/nrow(dge_ex)
+
+#filter out lowly expressed genes
+dge_ex <- dge_ex[isexpr_ex,,keep.lib.sizes=FALSE]
+dim(dge_ex)
+
+# TMM normalization
+dge_ex <- calcNormFactors(dge_ex)
+
+
+# calculate design matrix 
+#indicates condition for each lane
+#Makes NS 1 and KS 0
+design_ex <- model.matrix(~stressor, data=expt.des)
+
+```
+
+```{r}
+# Calculate weights to correct for Poisson count noise due to discrete nature of RNA-seq. This is done by empirically fitting a curve to 
+# (and also log converts).
+# This allows us to use a weighted linear model rather than requiring a 
+# more complex generalized linear model of a negative binomial distribution.
+v_ex <- voom(dge_ex,design_ex,plot=TRUE)
+
+# lmFit fits linear model across all genes (like lm() in base R)
+fit_ex <- lmFit(v_ex, design_ex)
+
+```
+
+
+```{r}
+
+# Here we set a contrast matrix that specifies exactly the contrasts we are interested in
+cont.matrix_ex <- makeContrasts( "stressorNS", levels= design )
+
+# ensure row names match
+rownames(cont.matrix_ex) = c("(Intercept)", "stressorNS")
+
+fit3 <- contrasts.fit(fit_ex, cont.matrix_ex)	
+
+# Do alternative splicing analysis
+
+# Tests for differential exon usage for each gene and for each column of fit3
+fit3_splice <- diffSplice(fit3, geneid= rownames(fit3))
+
+#Top table ranking the most differentially spliced genes or exons
+colnames(fit3_splice) # show the column names of comparisons
+FC_splice = topSplice(fit3_splice, coef="stressorNS", number=nrow(dge_ex$counts))
+
+head(FC_splice)
+```
+
+#Generate exon plots and save
+```{r}
+# Plot exon expression of top genes
+# Write a loop to generate plots for top 5 genes
+pdf("splicing_plots_bhm263.pdf")   # save plots to pdf
+for (i in 1:5) {  # plot top 10 genes
+plotSplice(fit3_splice, coef="stressorNS", geneid=FC_splice$GeneID[i])
+}
+dev.off()
+
+```
+
+#Comment on the experimental design 
+
+In the paper "A Comparative Study of Techniques for Differential Expression Analysis on RNA-Seq Data," the researchers found that number of biological replicates was most important in increaseing the number of DEGs (Differentially expressed genes) as well as increasing the area under the Receiver operating characteristic(ROC) curve, which is used to measure performance of a particular method.  This finding lead the researchers to reccomend prioritizing number of biological replicates over sequencing depth.  The paper also suggested that the number of DEGs found plateaus at 4 biological replicates, but increasing replicates beyond 4 lead to a larger AUROC, which suggests stronger performance, presumably increasded accuracy.  This paper also stresses the importance of biological replciates because there is so much random variation between two biological samples.  More replicates allows for better determination of variation of interest, i.e. condition-based differential expression.  Given these findings, I think that this experimental design succeeded in prioritizing biological replicates. 
+
+In the experimental design, there were two technical replicates for each biological replciate.  Technical replicates can be averaged to reduce variation in the technique itself. One of the advantages of the RNA-seq technique is its high reproducibility or its low technical variation.  So two technical replicates is more than sufficient for accounting for technical variation.  Many experimental designs do not utilize technical replicates because of the high reproducibility of the technique.  However, a greater number of biological replicates is required for this experiment.
