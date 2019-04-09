@@ -1,0 +1,283 @@
+#HOMEWORK SNPS - BROOKE MASTROGIACOMO
+
+srun --mem 10GB --cpus-per-task 4  --pty /bin/bash
+
+module purge
+module load bwa/intel/0.7.15
+module load picard/2.8.2
+module load samtools/intel/1.6
+module load gatk/3.8-0
+module load igvtools/2.3.91
+
+cd $SCRATCH
+cd HomeworkSNP
+
+PTC_Human.fa             Sample2_GandG2015.fastq  Sample4_GandG2015.fastq
+Sample1_GandG2015.fastq  Sample3_GandG2015.fastq  Sample5_GandG2015.fastq
+
+#PART 1 ALIGN WITH BWA
+#create index
+bwa index PTC_Human.fa
+
+bwa mem -M -R <readgroup_info> \
+<ref> <reads_1.fast> <reads_2.fastq> > <output.sam>
+
+#run alignment
+
+#do i need to change read group tag?
+
+bwa mem -M -R '@RG\tID:sample_1\tLB:sample_1\tPL:ILLUMINA\tPM:HISEQ\tSM:sample_1' PTC_Human.fa Sample1_GandG2015.fastq > Sample1_aligned.sam
+
+bwa mem -M -R '@RG\tID:sample_1\tLB:sample_1\tPL:ILLUMINA\tPM:HISEQ\tSM:sample_1' PTC_Human.fa Sample2_GandG2015.fastq > Sample2_aligned.sam
+
+bwa mem -M -R '@RG\tID:sample_1\tLB:sample_1\tPL:ILLUMINA\tPM:HISEQ\tSM:sample_1' PTC_Human.fa Sample3_GandG2015.fastq > Sample3_aligned.sam
+
+bwa mem -M -R '@RG\tID:sample_1\tLB:sample_1\tPL:ILLUMINA\tPM:HISEQ\tSM:sample_1' PTC_Human.fa Sample4_GandG2015.fastq > Sample4_aligned.sam
+
+bwa mem -M -R '@RG\tID:sample_1\tLB:sample_1\tPL:ILLUMINA\tPM:HISEQ\tSM:sample_1' PTC_Human.fa Sample5_GandG2015.fastq > Sample5_aligned.sam
+
+
+#PART 2 SORT BAM FILES
+#create sorted bam files
+
+java -jar $PICARD_JAR SortSam INPUT=Sample1_aligned.sam OUTPUT=Sample1_aligned.bam SORT_ORDER=coordinate
+
+java -jar $PICARD_JAR SortSam INPUT=Sample2_aligned.sam OUTPUT=Sample2_aligned.bam SORT_ORDER=coordinate
+
+java -jar $PICARD_JAR SortSam INPUT=Sample3_aligned.sam OUTPUT=Sample3_aligned.bam SORT_ORDER=coordinate
+
+java -jar $PICARD_JAR SortSam INPUT=Sample4_aligned.sam OUTPUT=Sample4_aligned.bam SORT_ORDER=coordinate
+
+java -jar $PICARD_JAR SortSam INPUT=Sample5_aligned.sam OUTPUT=Sample5_aligned.bam SORT_ORDER=coordinate
+
+
+#PART 3 ADD READ GROUPS
+
+java -jar $PICARD_JAR AddOrReplaceReadGroups \
+      I=Sample1_aligned.bam \
+      O=Sample1_alignedRG.bam \
+      RGID=sample_1 \
+      RGLB=sample_1 \
+      RGPL=illumina \
+      RGPU=unit1 \
+      RGSM=sample_1
+
+java -jar $PICARD_JAR AddOrReplaceReadGroups \
+      I=Sample2_aligned.bam \
+      O=Sample2_alignedRG.bam \
+      RGID=sample_2 \
+      RGLB=sample_2 \
+      RGPL=illumina \
+      RGPU=unit1 \
+      RGSM=sample_2
+      
+java -jar $PICARD_JAR AddOrReplaceReadGroups \
+      I=Sample3_aligned.bam \
+      O=Sample3_alignedRG.bam \
+      RGID=sample_3 \
+      RGLB=sample_3 \
+      RGPL=illumina \
+      RGPU=unit1 \
+      RGSM=sample_3
+
+java -jar $PICARD_JAR AddOrReplaceReadGroups \
+      I=Sample4_aligned.bam \
+      O=Sample4_alignedRG.bam \
+      RGID=sample_4 \
+      RGLB=sample_4 \
+      RGPL=illumina \
+      RGPU=unit1 \
+      RGSM=sample_4
+
+
+java -jar $PICARD_JAR AddOrReplaceReadGroups \
+      I=Sample5_aligned.bam \
+      O=Sample5_alignedRG.bam \
+      RGID=sample_5 \
+      RGLB=sample_5 \
+      RGPL=illumina \
+      RGPU=unit1 \
+      RGSM=sample_5
+      
+
+#PART 4 MARK DUPLICATES 
+
+java -jar $PICARD_JAR MarkDuplicates INPUT=Sample1_alignedRG.bam OUTPUT=dedup_sample1.bam METRICS_FILE=metrics.txt
+
+java -jar $PICARD_JAR MarkDuplicates INPUT=Sample2_alignedRG.bam OUTPUT=dedup_sample2.bam METRICS_FILE=metrics.txt
+
+java -jar $PICARD_JAR MarkDuplicates INPUT=Sample3_alignedRG.bam OUTPUT=dedup_sample3.bam METRICS_FILE=metrics.txt
+
+java -jar $PICARD_JAR MarkDuplicates INPUT=Sample4_alignedRG.bam OUTPUT=dedup_sample4.bam METRICS_FILE=metrics.txt
+
+java -jar $PICARD_JAR MarkDuplicates INPUT=Sample5_alignedRG.bam OUTPUT=dedup_sample5.bam METRICS_FILE=metrics.txt
+
+
+#PART 5 REALIGN GAPS 
+
+#PART B BUILD INDEX 
+
+java -jar $PICARD_JAR CreateSequenceDictionary R=PTC_Human.fa O=PTC_Human.dict
+
+samtools faidx PTC_Human.fa
+
+java -jar $PICARD_JAR  BuildBamIndex I=dedup_sample1.bam
+
+java -jar $PICARD_JAR  BuildBamIndex I=dedup_sample2.bam
+
+java -jar $PICARD_JAR  BuildBamIndex I=dedup_sample3.bam
+
+java -jar $PICARD_JAR  BuildBamIndex I=dedup_sample4.bam
+
+java -jar $PICARD_JAR  BuildBamIndex I=dedup_sample5.bam
+
+#PART C 
+
+java -jar $GATK_JAR \
+   -T RealignerTargetCreator \
+   -R PTC_Human.fa \
+   -I dedup_sample1.bam \
+   -o forIndelRealigner1.intervals
+   
+java -jar $GATK_JAR \
+   -T RealignerTargetCreator \
+   -R PTC_Human.fa \
+   -I dedup_sample2.bam \
+   -o forIndelRealigner2.intervals
+   
+java -jar $GATK_JAR \
+   -T RealignerTargetCreator \
+   -R PTC_Human.fa \
+   -I dedup_sample3.bam \
+   -o forIndelRealigner3.intervals
+   
+java -jar $GATK_JAR \
+   -T RealignerTargetCreator \
+   -R PTC_Human.fa \
+   -I dedup_sample4.bam \
+   -o forIndelRealigner4.intervals
+   
+java -jar $GATK_JAR \
+   -T RealignerTargetCreator \
+   -R PTC_Human.fa \
+   -I dedup_sample5.bam \
+   -o forIndelRealigner5.intervals
+   
+
+ java -jar $GATK_JAR \
+   -T IndelRealigner \
+   -R PTC_Human.fa\
+   -I dedup_sample1.bam \
+   -targetIntervals forIndelRealigner1.intervals \
+   -o Sample1_realignedBam.bam
+   
+java -jar $GATK_JAR \
+   -T IndelRealigner \
+   -R PTC_Human.fa\
+   -I dedup_sample2.bam \
+   -targetIntervals forIndelRealigner2.intervals \
+   -o Sample2_realignedBam.bam
+   
+java -jar $GATK_JAR \
+   -T IndelRealigner \
+   -R PTC_Human.fa\
+   -I dedup_sample3.bam \
+   -targetIntervals forIndelRealigner3.intervals \
+   -o Sample3_realignedBam.bam
+   
+java -jar $GATK_JAR \
+   -T IndelRealigner \
+   -R PTC_Human.fa\
+   -I dedup_sample4.bam \
+   -targetIntervals forIndelRealigner4.intervals \
+   -o Sample4_realignedBam.bam
+   
+java -jar $GATK_JAR \
+   -T IndelRealigner \
+   -R PTC_Human.fa\
+   -I dedup_sample5.bam \
+   -targetIntervals forIndelRealigner5.intervals \
+   -o Sample5_realignedBam.bam
+
+#PART 6 MERGE BAM FILES
+
+java -jar $PICARD_JAR MergeSamFiles \
+      I=Sample1_realignedBam.bam \
+      I=Sample2_realignedBam.bam \
+      I=Sample3_realignedBam.bam \
+      I=Sample4_realignedBam.bam \
+      I=Sample5_realignedBam.bam \
+      O=merged_files.bam
+
+
+#PART 7 SORT AND INDEX MERGED FILE
+
+java -jar $PICARD_JAR SortSam INPUT=merged_files.bam OUTPUT=merged_files_sorted.bam SORT_ORDER=coordinate
+
+java -jar $PICARD_JAR  BuildBamIndex I=merged_files_sorted.bam
+
+#PART 8 RUN GATK
+
+java -jar $GATK_JAR \
+   -T UnifiedGenotyper \
+   -R PTC_Human.fa \
+   -I merged_files_sorted.bam \
+   -o snps.raw.vcf 
+
+#PART 9 FILTER VCF FILE 
+
+ java -jar $GATK_JAR \
+   -T VariantFiltration \
+   -R PTC_Human.fa \
+   -V snps.raw.vcf \
+   --filterName "Filter" \
+   --filterExpression "QD<2.0||MQ<40.0||FS>60.0||HaplotypeScore>13.0000" \
+   -o filtered_snps.vcf 
+
+#PART 10 INDEX VCF W. IGVTOOLS
+
+igvtools index filtered_snps.vcf
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
